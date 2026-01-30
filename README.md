@@ -137,11 +137,6 @@ bash <(curl -sL "https://raw.githubusercontent.com/cy33r/IR-NET/main/MENU-EN.sh?
 TBwGy36S9AV7iXFukdC8Y94zQZhQndPJyD
 ```
 
-**TETHER (USDT) - BEP20**
-```
-0xC69fa0FecB4c76d89813dA6BC64827Db399B73f6
-```
-
 ## ⚖️ مجوز انتشار
 این پروژه تحت مجوز MIT منتشر شده است.
 
