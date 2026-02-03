@@ -494,53 +494,65 @@ show_banner() {
     echo ""
 }
 
-# --- SYSTEM STATUS ---
+# --- SYSTEM STATUS (OPTIMIZED FOR IRAN NETWORK - MAX 3s DELAY) ---
 show_enhanced_system_status() {
     local ipv4_file="/tmp/ip4_$$"
     local ipv6_file="/tmp/ip6_$$"
     local isp_file="/tmp/isp_$$"
     
+    # --- 1. IPv4 FETCH (Timeout limit: 2s) ---
     (
-        local services=("https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ifconfig.me")
-        local ip="N/A"
+        # Try Cloudflare (ipify) first, then icanhazip. Both are fast.
+        # timeout 2s: Kills the process if it takes > 2s (System level kill)
+        local services=("https://api.ipify.org" "https://ipv4.icanhazip.com")
         for service in "${services[@]}"; do
-            ip=$(curl -s --max-time 1 --ipv4 "$service" | xargs)
+            # --connect-timeout 1: Fail fast if firewall drops packet
+            # --max-time 1: Fail fast if transfer is slow
+            local ip
+            ip=$(timeout 2s curl -s --connect-timeout 1 --max-time 1 --ipv4 "$service" 2>/dev/null | xargs)
             if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 echo "$ip" > "$ipv4_file"
-                return
+                exit 0
             fi
         done
         echo "N/A" > "$ipv4_file"
     ) &
 
+    # --- 2. IPv6 FETCH (Timeout limit: 2s) ---
     (
-        local services=("https://ipv6.icanhazip.com" "https://api64.ipify.org")
-        local ip="N/A"
+        local services=("https://api64.ipify.org" "https://ipv6.icanhazip.com")
         for service in "${services[@]}"; do
-            ip=$(curl -s --max-time 1 --ipv6 "$service" | xargs)
+            local ip
+            ip=$(timeout 2s curl -s --connect-timeout 1 --max-time 1 --ipv6 "$service" 2>/dev/null | xargs)
             if [[ "$ip" =~ ^([0-9a-fA-F:]+:+)+[0-9a-fA-F]+$ ]]; then
                 echo "$ip" > "$ipv6_file"
-                return
+                exit 0
             fi
         done
         echo "N/A" > "$ipv6_file"
     ) &
 
+    # --- 3. ISP FETCH (Timeout limit: 2s) ---
     (
         local prov
-        prov=$(curl -fs --max-time 1 http://ip-api.com/line?fields=isp 2>/dev/null | tr -d '\n')
+        # ip-api is http, can be blocked. timeout 2s is crucial here.
+        prov=$(timeout 2s curl -fs --connect-timeout 1 --max-time 1 http://ip-api.com/line?fields=isp 2>/dev/null | tr -d '\n')
         [ -z "$prov" ] && prov="N/A"
         echo "$prov" > "$isp_file"
     ) &
 
+    # Wait for background jobs (Max 2s due to timeout command)
     wait
 
+    # Read Results (Default to N/A if files missing)
     local public_ipv4=$(cat "$ipv4_file" 2>/dev/null || echo "N/A")
     local public_ipv6=$(cat "$ipv6_file" 2>/dev/null || echo "N/A")
     local provider=$(cat "$isp_file" 2>/dev/null || echo "N/A")
     
+    # Cleanup
     rm -f "$ipv4_file" "$ipv6_file" "$isp_file"
 
+    # --- DISPLAY LOGIC (UNCHANGED) ---
     get_visual_length() {
         local clean_string
         clean_string=$(echo -e "$1" | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d "$LRM$RLM")
@@ -1693,88 +1705,215 @@ _dns_show_unique() {
 }
 
 manage_dns() {
+    # --- HELPER: FORCE APPLY DNS (USER METHOD + PERMISSION FIX) ---
+    _force_apply_dns() {
+        local d1=$1
+        local d2=$2
+        
+        log_message "INFO" "APPLYING DNS SETTINGS (FORCE OVERWRITE)..."
+        
+        # 1. UNLOCK FILE (Fix for 'Operation not permitted')
+        if command -v chattr &>/dev/null; then
+            chattr -i /etc/resolv.conf 2>/dev/null
+        fi
+        
+        # 2. The exact command requested
+        rm -rf /etc/resolv.conf && touch /etc/resolv.conf
+        echo "nameserver $d1" >> /etc/resolv.conf
+        if [ -n "$d2" ]; then
+            echo "nameserver $d2" >> /etc/resolv.conf
+        fi
+        
+        # 3. LOCK FILE AGAIN (To ensure it stays Persistent)
+        if command -v chattr &>/dev/null; then
+            chattr +i /etc/resolv.conf 2>/dev/null
+        fi
+        
+        log_message "SUCCESS" "DNS CONFIGURATION UPDATED."
+        echo -e "\n${B_GREEN}DNS SET TO: $d1 ${d2:+& $d2}${C_RESET}"
+    }
+
+    # --- MAIN DNS MANAGER ---
     clear
+    # 1. Check for fping dependency
     if ! command -v fping &>/dev/null; then
-        log_message "WARNING" "FPING TOOL NOT FOUND. ATTEMPTING TO INSTALL AUTOMATICALLY..."
-        if ! install_dependencies; then
-            log_message "ERROR" "AUTOMATIC INSTALLATION OF 'FPING' FAILED."
+        log_message "WARNING" "FPING TOOL NOT FOUND. ATTEMPTING TO INSTALL..."
+        apt-get update -qq && apt-get install -y fping -qq
+        if ! command -v fping &>/dev/null; then
+            log_message "ERROR" "FPING INSTALLATION FAILED. CANNOT SCAN."
             read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
             return
         fi
-        log_message "SUCCESS" "'FPING' TOOL INSTALLED SUCCESSFULLY. CONTINUING..."
-        sleep 2
     fi
 
+    # 2. DNS Lists
     local IRAN_DNS_LIST=(
-        "178.22.122.100" "185.51.200.2" "10.202.10.10" "10.202.10.11" "78.157.42.100" "78.157.42.101" "185.55.226.26" "185.55.225.25" "10.202.10.202" "10.202.10.102" "194.5.175.175" "194.5.174.174" "194.36.174.161" "185.239.40.40" "85.15.1.15" "85.15.1.14" "91.99.101.102" "91.99.101.103" "92.114.28.2" "92.114.29.2" "217.218.155.155" "217.218.127.127" "91.98.98.98" "217.66.195.210" "79.175.131.2" "79.175.131.3" "188.136.215.180" "188.136.215.181" "91.99.99.91" "195.248.240.60" "195.248.240.92" "213.151.48.2" "213.151.48.3"
-    )
-    local GLOBAL_DNS_LIST=(
-        "8.8.8.8" "8.8.4.4" "1.1.1.1" "1.0.0.1" "9.9.9.9" "149.112.112.112" "208.67.222.222" "208.67.220.220" "8.26.56.26" "8.20.247.20" "94.140.14.14" "94.140.15.15" "77.88.8.8" "77.88.8.1" "64.6.64.6" "64.6.65.6" "4.2.2.1" "4.2.2.2" "4.2.2.3" "4.2.2.4" "84.200.69.80" "84.200.70.40" "80.80.80.80" "80.80.81.81" "156.154.70.1" "156.154.71.1" "185.228.168.9" "185.228.169.9" "76.76.19.19" "76.223.122.150" "76.76.2.0" "76.76.10.0" "195.46.39.39" "195.46.39.40" "91.239.100.100" "89.233.43.71"
+        "178.22.122.100" "185.51.200.2" "78.157.42.100" "78.157.42.101"
+        "10.202.10.10" "10.202.10.11" "10.202.10.202" "10.202.10.102"
+        "185.55.226.26" "185.55.225.25" "217.218.155.155" "217.218.127.127"
+        "217.218.127.104" "217.218.127.105" "85.15.1.15" "85.15.1.14"
+        "91.99.101.102" "91.99.101.103" "195.248.240.60" "195.248.240.92"
+        "185.98.113.113" "185.98.114.114" "92.42.49.43" "5.202.100.100"
+        "5.202.100.101" "217.219.157.2" "5.200.200.200" "80.191.233.17"
+        "80.191.233.33" "213.151.48.2" "213.151.48.3" "89.144.144.144"
+        "185.231.182.126" "185.97.117.187" "194.5.175.175" "194.5.174.174"
+        "5.145.112.38" "5.145.112.39" "2.185.239.133" "2.185.239.134"
+        "81.163.3.1" "81.163.3.2" "46.224.1.42" "46.224.1.43"
+        "78.38.117.206" "85.185.67.235" "194.225.152.10" "194.225.73.141"
+        "91.245.229.1" "91.245.229.2"
     )
 
+    local GLOBAL_DNS_LIST=(
+        "8.8.8.8" "8.8.4.4" "1.1.1.1" "1.0.0.1" "9.9.9.9" "149.112.112.112"
+        "208.67.222.222" "208.67.220.220" "94.140.14.14" "94.140.15.15"
+        "4.2.2.1" "4.2.2.2" "4.2.2.3" "4.2.2.4" "64.6.64.6" "64.6.65.6"
+        "1.1.1.2" "1.0.0.2" "1.1.1.3" "1.0.0.3" "185.228.168.9" "185.228.169.9"
+        "185.228.168.168" "185.228.169.168" "208.67.222.123" "208.67.220.123"
+        "8.26.56.26" "8.20.247.20" "77.88.8.8" "77.88.8.1" "84.200.69.80"
+        "84.200.70.40" "156.154.70.1" "156.154.71.1" "74.82.42.42"
+        "76.76.19.19" "76.223.122.150" "91.239.100.100" "89.233.43.71"
+    )
+
+    # 3. Scan Function with Selection
     find_and_set_best_dns() {
         local -n dns_list=$1
         local list_name="$2"
-        echo -e "\n${B_CYAN}--- PINGING DNS SERVERS FROM THE ${list_name^^} LIST ---${C_RESET}"
-        echo -e "${C_WHITE}PLEASE WAIT, THIS MAY TAKE A MOMENT...${C_RESET}"
+        
+        echo -e "\n${B_CYAN}--- PINGING ALL ${list_name^^} DNS SERVERS ---${C_RESET}"
+        echo -e "${C_WHITE}SCANNING... PLEASE WAIT...${C_RESET}"
+        
         local fping_results
-        fping_results=$(fping -C 3 -q -B1 -i10 "${dns_list[@]}" 2>&1)
+        fping_results=$(fping -C 3 -q -i 25 "${dns_list[@]}" 2>&1)
+        
         local results_array=()
+        
         while IFS= read -r line; do
-            if [[ $line && ! "$line" == *"-"* ]]; then
+            if [[ -n "$line" && "$line" != *" - - -"* ]]; then
                 local ip avg_ping
                 ip=$(echo "$line" | awk '{print $1}')
-                avg_ping=$(echo "$line" | awk '{s=0; for(i=3;i<=NF;i++) s+=$i; print s/(NF-2)}' | bc -l)
-                results_array+=("$(printf "%.2f" $avg_ping)|$ip")
+                avg_ping=$(echo "$line" | awk '{
+                    sum=0; count=0;
+                    for(i=3; i<=NF; i++) {
+                        if($i != "-") { sum+=$i; count++; }
+                    }
+                    if(count>0) print sum/count; else print 9999;
+                }' | bc -l)
+                
+                if (( $(echo "$avg_ping < 1000" | bc -l) )); then
+                    results_array+=("$(printf "%.2f" $avg_ping)|$ip")
+                fi
             fi
         done <<< "$fping_results"
+
         if [ ${#results_array[@]} -eq 0 ]; then
-            log_message "ERROR" "NONE OF THE DNS SERVERS RESPONDED. PLEASE CHECK YOUR INTERNET CONNECTION."
+            log_message "ERROR" "NO DNS RESPONDED. CHECK NETWORK."
             return
         fi
+
         mapfile -t sorted_results < <(printf '%s\n' "${results_array[@]}" | sort -n)
-        echo
-        printf "${B_BLUE}+------------------------+--------------------------+${C_RESET}\n"
-        printf "${B_BLUE}| ${B_YELLOW}%-22s ${B_BLUE}| ${B_YELLOW}%-24s ${B_BLUE}|${C_RESET}\n" "DNS SERVER" "AVERAGE PING (MS)"
-        printf "${B_BLUE}+------------------------+--------------------------+${C_RESET}\n"
+
+        # Display Top 15
+        clear
+        echo -e "${B_CYAN}--- TOP FASTEST DNS SERVERS (${list_name^^}) ---${C_RESET}\n"
+        printf "${B_BLUE}+----+------------------------+-------------------+${C_RESET}\n"
+        printf "${B_BLUE}| ${B_YELLOW}%-2s ${B_BLUE}| ${B_YELLOW}%-22s ${B_BLUE}| ${B_YELLOW}%-17s ${B_BLUE}|${C_RESET}\n" "NO" "IP ADDRESS" "AVG PING (ms)"
+        printf "${B_BLUE}+----+------------------------+-------------------+${C_RESET}\n"
+
+        local count=0
+        local limit=15
+        local display_ips=()
+        
         for result in "${sorted_results[@]}"; do
+            if [ $count -ge $limit ]; then break; fi
             local ping_val="${result%|*}"
             local ip_val="${result#*|}"
-            printf "${B_BLUE}|${N} ${C_CYAN}%-22s ${B_BLUE}|${N} ${G}%-24s ${B_BLUE}|${N}\n" "$ip_val" "$ping_val"
+            display_ips+=("$ip_val")
+            
+            printf "${B_BLUE}| ${C_WHITE}%-2d ${B_BLUE}| ${B_GREEN}%-22s ${B_BLUE}| ${C_WHITE}%-17s ${B_BLUE}|${C_RESET}\n" "$((count+1))" "$ip_val" "$ping_val"
+            ((count++))
         done
-        printf "${B_BLUE}+------------------------+--------------------------+${C_RESET}\n"
-        echo
-        mapfile -t best_ips < <(printf '%s\n' "${sorted_results[@]}" | awk -F'|' '{print $2}')
-        if [ "${#best_ips[@]}" -lt 2 ]; then
-            log_message "WARNING" "ONLY ONE ACCESSIBLE DNS WAS FOUND. SETTING BOTH DNS TO IT."
+        printf "${B_BLUE}+----+------------------------+-------------------+${C_RESET}\n"
+        
+        echo -e "\n${C_YELLOW}WHICH DNS DO YOU WANT TO APPLY?${C_RESET}"
+        printf "%b" "${B_MAGENTA}ENTER NUMBER (1-$count) OR '0' TO CANCEL: ${C_RESET}"
+        read -e -r select_num
+        
+        if [[ "$select_num" =~ ^[0-9]+$ ]] && [ "$select_num" -ge 1 ] && [ "$select_num" -le "$count" ]; then
+            local index=$((select_num-1))
+            local primary_dns="${display_ips[$index]}"
+            local secondary_dns=""
+            
+            printf "%b" "${B_MAGENTA}ENTER SECONDARY DNS (IP OR NUMBER from list, Press ENTER to skip): ${C_RESET}"
+            read -e -r sec_input
+            
+            if [ -n "$sec_input" ]; then
+                # Check if input is a number in range
+                if [[ "$sec_input" =~ ^[0-9]+$ ]] && [ "$sec_input" -ge 1 ] && [ "$sec_input" -le "$count" ]; then
+                     local sec_index=$((sec_input-1))
+                     secondary_dns="${display_ips[$sec_index]}"
+                else
+                     # Assume it's a manual IP
+                     secondary_dns="$sec_input"
+                fi
+            fi
+            
+            _force_apply_dns "$primary_dns" "$secondary_dns"
+        elif [ "$select_num" -eq 0 ]; then
+            log_message "INFO" "SELECTION CANCELED."
+        else
+            log_message "ERROR" "INVALID SELECTION."
         fi
-        local best_dns_1="${best_ips[0]}"
-        local best_dns_2="${best_ips[1]:-${best_ips[0]}}"
-        apply_dns_persistent "$best_dns_1" "$best_dns_2"
     }
 
+    # 4. Manual Set Function (Persistent)
+    _set_manual_dns_persistent() {
+        echo -e "\n${B_CYAN}--- SET MANUAL DNS (FORCE OVERWRITE) ---${C_RESET}"
+        printf "%b" "${B_MAGENTA}ENTER PRIMARY DNS IP: ${C_RESET}"; read -e -r dns1
+        
+        if [[ -z "$dns1" ]]; then
+            log_message "ERROR" "PRIMARY DNS CANNOT BE EMPTY."
+            return
+        fi
+        
+        printf "%b" "${B_MAGENTA}ENTER SECONDARY DNS IP (OPTIONAL): ${C_RESET}"; read -e -r dns2
+        
+        _force_apply_dns "$dns1" "$dns2"
+    }
+    
+    # 5. Reset Function
+    _reset_dns_default() {
+        log_message "INFO" "RESETTING DNS TO GOOGLE (8.8.8.8)..."
+        _force_apply_dns "8.8.8.8" "1.1.1.1"
+    }
+
+    # 6. Main Loop
     while true; do
         clear
         echo -e "${B_CYAN}--- MANAGE AND FIND BEST DNS ---${C_RESET}\n"
-        show_current_dns_smart
+        echo -e "${C_WHITE}CURRENT DNS IN /etc/resolv.conf:${C_RESET}"
+        grep "nameserver" /etc/resolv.conf | cut -d " " -f 2 | xargs | sed 's/^/  /'
+        echo ""
+        
         printf "  ${C_YELLOW}%2d)${C_WHITE} %s\n" "1" "FIND AND SET BEST IRAN DNS"
         printf "  ${C_YELLOW}%2d)${C_WHITE} %s\n" "2" "FIND AND SET BEST GLOBAL DNS"
         printf "  ${C_YELLOW}%2d)${B_GREEN} %s\n" "3" "SET MANUAL DNS (PERSISTENT)"
-        printf "  ${C_YELLOW}%2d)${C_RED} %s\n" "4" "RESET DNS TO DEFAULT"
+        printf "  ${C_YELLOW}%2d)${C_RED} %s\n" "4" "RESET DNS TO DEFAULT (8.8.8.8)"
         printf "  ${C_YELLOW}%2d)${C_WHITE} %s\n" "5" "BACK"
         echo -e "${B_BLUE}-----------------------------------${C_RESET}"
         printf "%b" "${B_MAGENTA}PLEASE SELECT AN OPTION: ${C_RESET}"; read -e -r choice
 
         case $choice in
-            1) find_and_set_best_dns IRAN_DNS_LIST "Iran"; break ;;
-            2) find_and_set_best_dns GLOBAL_DNS_LIST "Global"; break ;;
-            3) _dns_set_persistent_interactive; break ;;
-            4) _dns_reset_to_default; break ;;
+            1) find_and_set_best_dns IRAN_DNS_LIST "Iran" ;;
+            2) find_and_set_best_dns GLOBAL_DNS_LIST "Global" ;;
+            3) _set_manual_dns_persistent ;;
+            4) _reset_dns_default ;;
             5) return ;;
             *) echo -e "\n${C_RED}INVALID OPTION!${C_RESET}"; sleep 1 ;;
         esac
+        if [ "$choice" != "5" ]; then
+             read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
+        fi
     done
-    read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
 }
 
 manage_secure_dns() {
