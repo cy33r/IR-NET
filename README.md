@@ -74,3 +74,6 @@ chmod +x MENU.sh
 # 2. اجرای اسکریپت با دسترسی روت
 sudo bash MENU.sh
 
+# 3. اجرای اسکریپت از گیت هاب مستقیم
+
+sudo apt update && sudo apt install -y curl && bash <(curl -Ls https://raw.githubusercontent.com/cy33r/IR-NET/main/MENU.sh)
