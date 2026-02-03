@@ -3119,66 +3119,183 @@ manage_cleanup_submenu() {
     done
 }
 
-# --- 4.6 FIND FASTEST APT MIRROR ---
+# ###########################################################################
+# --- FIND FASTEST APT MIRROR (OPTIMIZED - NO TEMP FILES) ---
+# ###########################################################################
+
 advanced_mirror_test() {
+    # 1. Define Mirrors
+    local MIRRORS=(
+        "http://archive.ubuntu.com/ubuntu/"
+        "https://mirror.mobinhost.com/ubuntu/"
+        "https://mirrors.pardisco.co/ubuntu/"
+        "https://mirror.shatel.ir/ubuntu/"
+        "https://archive.ito.gov.ir/ubuntu/"
+        "http://mirror.arvancloud.ir/ubuntu/"
+        "https://mirror-linux.runflare.com/ubuntu/"
+        "https://mirror.aminidc.com/ubuntu/"
+        "http://mirror.faraso.org/ubuntu/"
+        "https://ir.ubuntu.sindad.cloud/ubuntu/"
+        "https://ubuntu-mirror.kimiahost.com/ubuntu/"
+        "https://archive.ubuntu.petiak.ir/ubuntu/"
+        "https://ubuntu.hostiran.ir/ubuntuarchive/"
+        "https://ubuntu.bardia.tech/"
+        "https://mirror.iranserver.com/ubuntu/"
+        "https://ir.archive.ubuntu.com/ubuntu/"
+        "https://mirror.0-1.cloud/ubuntu/"
+        "http://linuxmirrors.ir/pub/ubuntu/"
+        "http://repo.iut.ac.ir/repo/Ubuntu/"
+        "http://ubuntu.byteiran.com/ubuntu/"
+        "https://mirror.rasanegar.com/ubuntu/"
+        "http://mirrors.sharif.ir/ubuntu/"
+        "http://mirror.ut.ac.ir/ubuntu/"
+        "https://ubuntu.pars.host/ubuntu/"
+        "https://ubuntu.parsvds.com/ubuntu/"
+        "https://ubuntu.pishgaman.net/ubuntu/"
+    )
+
     clear
     log_message "INFO" "--- ADVANCED APT REPOSITORY ANALYSIS ---"
+    echo -e "${B_CYAN}--- FINDING FASTEST APT MIRROR ---${C_RESET}\n"
     
-    test_mirror_speed() {
-        local url="$1/ls-lR.gz"
-        local speed
-        speed=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 3 "$url" 2>/dev/null | cut -d'.' -f1)
-        if [[ -z "$speed" || "$speed" -lt 10240 ]]; then echo "0"; else echo $((speed / 1024)); fi
-    }
-
-    apply_mirror() {
-        local url="$1" name="$2"
-        log_message "INFO" "APPLYING MIRROR: $name ($url)"
-        if ! command -v lsb_release &> /dev/null; then log_message "ERROR" "LSB-RELEASE NOT FOUND."; return; fi
-        
-        local codename=$(lsb_release -cs)
-        local sources_file="/etc/apt/sources.list"
-        create_backup "$sources_file"
-        
-        tee "$sources_file" > /dev/null <<EOF
-deb ${url} ${codename} main restricted universe multiverse
-deb ${url} ${codename}-updates main restricted universe multiverse
-deb ${url} ${codename}-backports main restricted universe multiverse
-deb ${url} ${codename}-security main restricted universe multiverse
-EOF
-        apt-get update
-        log_message "SUCCESS" "MIRROR UPDATED."
-    }
-
-    local mirrors=(
-        "http://archive.ubuntu.com/ubuntu/" 
-        "http://mirror.hetzner.com/ubuntu/packages/"
-        "http://mirrors.digitalocean.com/ubuntu/"
-        "http://mirror.leaseweb.com/ubuntu/"
-    )
+    # Arrays to store results
+    local valid_results=() 
     
-    echo -e "${Y}TESTING MIRRORS...${N}"
-    local temp_file="/tmp/mirror_test_$$"
-    for m in "${mirrors[@]}"; do
-        local s=$(test_mirror_speed "$m")
-        echo "$s|$m" >> "$temp_file"
-        echo -n "."
-    done
-    echo ""
+    local total_mirrors=${#MIRRORS[@]}
+    local current=0
 
-    sort -nr "$temp_file" -o "$temp_file"
-    local best=$(head -n 1 "$temp_file")
-    local best_url=$(echo "$best" | cut -d'|' -f2)
-    local best_speed=$(echo "$best" | cut -d'|' -f1)
-
-    echo -e "\n${G}FASTEST MIRROR: $best_url ($best_speed KB/s)${N}"
-    printf "%b" "${B_MAGENTA}APPLY THIS MIRROR? (Y/N): ${C_RESET}"; read -e -r confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        apply_mirror "$best_url" "Fastest_Auto"
+    # Detect OS Codename
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        CODENAME=$VERSION_CODENAME
+    else
+        CODENAME=$(lsb_release -sc)
     fi
-    rm -f "$temp_file"
-    read -n 1 -s -r -p "PRESS ANY KEY..."
+
+    echo -e "${C_WHITE}OS CODENAME: ${B_YELLOW}$CODENAME${C_RESET}"
+    echo -e "${B_BLUE}----------------------------------------------------------------${C_RESET}"
+    printf "%-45s %-15s\n" "MIRROR URL" "LATENCY"
+    echo -e "${B_BLUE}----------------------------------------------------------------${C_RESET}"
+
+    # 2. Scanning Loop
+    for url in "${MIRRORS[@]}"; do
+        ((current++))
+        echo -ne "\r${C_YELLOW}SCANNING [$current/$total_mirrors]: ${C_WHITE}Checking...${C_RESET}"
+        
+        # Check latency
+        time_taken=$(curl -o /dev/null -s -w "%{time_total}" --connect-timeout 2 --max-time 3 "$url" 2>/dev/null)
+        
+        echo -ne "\r\033[K" # Clear line
+
+        if [ -n "$time_taken" ] && [ "$time_taken" != "0.000000" ]; then
+            printf "${C_WHITE}%-45s ${B_GREEN}%-15s${C_RESET}\n" "${url:0:43}" "${time_taken}s"
+            # Store as "latency|url" for sorting
+            valid_results+=("$time_taken|$url")
+        else
+            printf "${C_RED}%-45s ${C_RED}%-15s${C_RESET}\n" "${url:0:43}" "TIMEOUT"
+        fi
+    done
+
+    echo -e "${B_BLUE}----------------------------------------------------------------${C_RESET}"
+    
+    if [ ${#valid_results[@]} -eq 0 ]; then
+        log_message "ERROR" "NO REACHABLE MIRRORS FOUND."
+        read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
+        return
+    fi
+
+    # 3. Sort Results (Fastest First)
+    # Using sort -n on the first field (latency)
+    IFS=$'\n' sorted_results=($(sort -n <<<"${valid_results[*]}"))
+    unset IFS
+
+    # Extract best mirror details
+    best_entry="${sorted_results[0]}"
+    best_time="${best_entry%%|*}"
+    best_url="${best_entry#*|}"
+
+    echo -e "\n${B_GREEN}FASTEST MIRROR FOUND:${C_RESET} ${B_YELLOW}$best_url${C_RESET} (${best_time}s)"
+    echo -e "${B_BLUE}----------------------------------------------------------------${C_RESET}"
+    
+    # 4. Selection Menu
+    echo -e "HOW DO YOU WANT TO PROCEED?"
+    echo -e "  ${B_GREEN}[A]${C_RESET} AUTO-SELECT FASTEST (Recommended)"
+    echo -e "  ${B_CYAN}[M]${C_RESET} MANUAL SELECTION FROM LIST"
+    echo -e "  ${C_RED}[X]${C_RESET} CANCEL"
+    
+    echo -ne "\n${B_MAGENTA}ENTER CHOICE (A/M/X): ${C_RESET}"
+    read -e -r user_choice
+
+    local final_mirror=""
+
+    case "${user_choice^^}" in
+        A)
+            final_mirror="$best_url"
+            log_message "INFO" "AUTO-SELECTED FASTEST MIRROR: $final_mirror"
+            ;;
+        M)
+            echo -e "\n${B_CYAN}--- TOP FASTEST MIRRORS ---${C_RESET}"
+            local i=0
+            local limit=10 # Show top 10
+            if [ ${#sorted_results[@]} -lt 10 ]; then limit=${#sorted_results[@]}; fi
+            
+            for ((i=0; i<limit; i++)); do
+                entry="${sorted_results[$i]}"
+                t="${entry%%|*}"
+                u="${entry#*|}"
+                printf "  ${C_YELLOW}%2d)${C_RESET} %-40s [${B_GREEN}%s${C_RESET}]\n" "$((i+1))" "$u" "${t}s"
+            done
+            
+            echo -ne "\n${B_MAGENTA}ENTER NUMBER (1-$limit): ${C_RESET}"
+            read -e -r manual_num
+            
+            if [[ "$manual_num" =~ ^[0-9]+$ ]] && [ "$manual_num" -ge 1 ] && [ "$manual_num" -le "$limit" ]; then
+                index=$((manual_num-1))
+                entry="${sorted_results[$index]}"
+                final_mirror="${entry#*|}"
+                log_message "INFO" "MANUALLY SELECTED MIRROR: $final_mirror"
+            else
+                log_message "ERROR" "INVALID SELECTION."
+                read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
+                return
+            fi
+            ;;
+        X)
+            log_message "INFO" "OPERATION CANCELED."
+            return
+            ;;
+        *)
+            log_message "ERROR" "INVALID OPTION."
+            return
+            ;;
+    esac
+
+    # 5. Apply Changes
+    if [ -n "$final_mirror" ]; then
+        local timestamp=$(date +"%Y%m%d_%H%M%S")
+        log_message "INFO" "BACKUP: /etc/apt/sources.list.bak_$timestamp"
+        cp /etc/apt/sources.list "/etc/apt/sources.list.bak_$timestamp"
+        
+        log_message "INFO" "APPLYING NEW MIRROR..."
+        cat > /etc/apt/sources.list <<EOF
+# Generated by Advanced Ubuntu Script - $timestamp
+# Mirror: $final_mirror
+
+deb $final_mirror $CODENAME main restricted universe multiverse
+deb $final_mirror $CODENAME-updates main restricted universe multiverse
+deb $final_mirror $CODENAME-backports main restricted universe multiverse
+deb $final_mirror $CODENAME-security main restricted universe multiverse
+EOF
+        log_message "SUCCESS" "SOURCES.LIST UPDATED SUCCESSFULLY."
+        
+        echo -e "\n${C_YELLOW}UPDATING PACKAGE LISTS (apt update)...${C_RESET}"
+        apt update
+        log_message "SUCCESS" "MIRROR UPDATE COMPLETED."
+    fi
+    
+    read -n 1 -s -r -p $'\n'"${R}PRESS ANY KEY TO CONTINUE...${N}"
 }
+
 
 # --- 4.7 AUTO REBOOT MANAGEMENT ---
 manage_reboot_cron() {
