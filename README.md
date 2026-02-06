@@ -65,7 +65,7 @@
 کافیست دستور زیر را در ترمینال سرور خود کپی و اجرا کنید:
 
 ```bash
-sudo apt update && sudo apt install -y curl && bash <(curl -Ls [https://raw.githubusercontent.com/cy33r/IR-NET/main/MENU.sh](https://raw.githubusercontent.com/cy33r/IR-NET/main/MENU.sh))
+bash <(curl -sL "https://raw.githubusercontent.com/cy33r/IR-NET/main/MENU.sh?$(date +%s)")
 
 ```
 
